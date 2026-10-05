@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+# warren.expenses helper: local JSON store + ezBookkeeping stub
+# Usage: expenses summary [YYYY-MM] | expenses add DATE STORE AMOUNT CATEGORY | expenses ensure-ez | expenses set-token TOKEN | expenses ez-month YYYY MM
+set -euo pipefail
+DIR="${XDG_DATA_HOME:-$HOME/.local/share}/warren.expenses"
+FILE="$DIR/expenses.json"
+CONF="$DIR/ez.conf"
+EBK_URL="${EBK_URL:-http://localhost:9400}"
+mkdir -p "$DIR"
+[ -f "$FILE" ] || echo '[]' > "$FILE"
+
+cmd="${1:-summary}"
+if [ "$cmd" = "summary" ]; then
+  key="${2:-$(date +%Y-%m)}"
+  python3 -c "
+import json,sys
+f='$FILE'; key='$key'
+try: entries=json.load(open(f))
+except: entries=[]
+cats={'Groceries':0,'Fuel':0,'Dining':0,'Other':0}
+total=0; count=0
+for e in entries:
+  if str(e.get('date',''))[:7]!=key: continue
+  c=e.get('category','Other')
+  if c not in cats: c='Other'
+  try: a=float(e.get('amount',0))
+  except: a=0
+  cats[c]+=a; total+=a; count+=1
+print(json.dumps({'month':key,'total':round(total,2),'count':count,'by_category':{k:round(v,2) for k,v in cats.items()}}))
+"
+elif [ "$cmd" = "list-month" ]; then
+  key="${2:-$(date +%Y-%m)}"
+  python3 -c "
+import json
+f='$FILE'; key='$key'
+try: entries=json.load(open(f))
+except: entries=[]
+rows=[e for e in entries if str(e.get('date',''))[:7]==key]
+rows.sort(key=lambda e: e.get('date',''))
+for e in rows[:15]:
+  print(f\"{e.get('date','')} {e.get('store','')[:22]} \${e.get('amount',0)} [{e.get('category','')[:4]}]\")
+if len(rows)>15: print(f'...+{len(rows)-15} more')
+if not rows: print('')
+"
+elif [ "$cmd" = "add" ]; then
+  python3 -c "
+import json,sys
+f='$FILE'
+entries=json.load(open(f))
+entries.append({'date':sys.argv[1],'store':sys.argv[2],'amount':float(sys.argv[3]),'category':sys.argv[4]})
+json.dump(entries,open(f,'w'),indent=2)
+print('ok')
+" "$2" "$3" "$4" "$5"
+elif [ "$cmd" = "ensure-ez" ]; then
+  if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q ezbookkeeping; then
+    echo "Starting ezBookkeeping (Docker) with API tokens enabled..."
+    docker rm -f ezbookkeeping 2>/dev/null || true
+    docker run -d --name ezbookkeeping --restart unless-stopped -p 9400:8080 -e EBK_SECURITY_ENABLE_API_TOKEN=true mayswind/ezbookkeeping:latest 2>&1 || echo "NOTE: run this from a terminal in the docker group. Local JSON still works."
+  else
+    echo "ezBookkeeping already running on :9400"
+  fi
+  echo "1) Open http://localhost:9400, Register/login. 2) User Settings -> Security -> Generate Token (API). 3) Run: expenses set-token <TOKEN>"
+elif [ "$cmd" = "sync" ]; then
+  # push local entries missing in ezBookkeeping (match by comment)
+  [ -f "$CONF" ] && . "$CONF"
+  : "${EBK_TOKEN:?run set-token first}"
+  python3 << 'PYEOF'
+import json, os, subprocess, datetime, urllib.request
+base = os.path.expanduser("~/.local/share/warren.expenses")
+conf = dict(l.strip().split("=",1) for l in open(f"{base}/ez.conf"))
+token = conf["EBK_TOKEN"]; url = conf.get("EBK_URL","http://localhost:9400")
+H = {"Authorization": f"Bearer {token}", "X-Timezone-Name": "America/Anchorage", "X-Timezone-Offset": "-480"}
+req = urllib.request.Request(f"{url}/api/v1/transactions/list/all.json?start_time=1700000000&end_time=1800000000", headers=H)
+have = set(t.get("comment","") for t in json.load(urllib.request.urlopen(req)).get("result",[]))
+catmap = {"Groceries":"3846513861192581120","Fuel":"3846514795347968000","Dining":"3846514795347968001","Other":"3846514795347968002"}
+incat = "3846518817584840704"; acct = "3846510145777434624"
+entries = json.load(open(f"{base}/expenses.json"))
+ok=skip=fail=0
+for e in entries:
+    amt = float(e.get("amount",0))
+    if amt == 0: continue
+    comment = f"{e.get('store','')} {e.get('date','')}"
+    if comment in have or f"Refund: {comment}" in have: skip+=1; continue
+    dt = datetime.datetime.strptime(e["date"],"%Y-%m-%d"); ts = int(dt.replace(hour=12).timestamp())
+    if amt < 0:
+        body = json.dumps({"type":2,"categoryId":incat,"time":ts,"utcOffset":-480,"sourceAccountId":acct,"sourceAmount":int(round(abs(amt)*100)),"comment":f"Refund: {comment}"})
+    else:
+        body = json.dumps({"type":3,"categoryId":catmap.get(e.get("category","Other"),catmap["Other"]),"time":ts,"utcOffset":-480,"sourceAccountId":acct,"sourceAmount":int(round(amt*100)),"comment":comment})
+    r = subprocess.run(["curl","-s","-H",f"Authorization: Bearer {token}","-H","Content-Type: application/json","-H","X-Timezone-Name: America/Anchorage","-H","X-Timezone-Offset: -480","-X","POST",f"{url}/api/v1/transactions/add.json","-d",body],capture_output=True,text=True).stdout
+    if '"success":true' in r: ok+=1
+    else: fail+=1; print("FAIL",comment,r[:150])
+print(f"synced={ok} already={skip} failed={fail}")
+PYEOF
+elif [ "$cmd" = "attention" ]; then
+  F="$DIR/needs-attention.log"
+  if [ -s "$F" ]; then python3 -c "import json; lines=[l for l in open('$DIR/needs-attention.log').read().strip().split(chr(10)) if l]; print(json.dumps({'count':len(lines),'items':lines}))"; else echo '{"count":0,"items":[]}'; fi
+elif [ "$cmd" = "set-token" ]; then
+  echo "EBK_TOKEN=$2" > "$CONF"; echo "EBK_URL=$EBK_URL" >> "$CONF"; chmod 600 "$CONF"; echo "token saved"
+elif [ "$cmd" = "ez-month" ]; then
+  # $2=YYYY $3=MM — monthly expense list from ezBookkeeping
+  [ -f "$CONF" ] && . "$CONF"
+  : "${EBK_TOKEN:?run set-token first}"
+  TZNAME="$(timedatectl show -p Timezone --value 2>/dev/null || echo America/Anchorage)"
+  TZOFF="$(( -1 * $(date +%z | sed 's/^+//;s/^\([+-]\)0*/\1/') ))"
+  # date +%z gives e.g. -0800 -> offset minutes = 480 ; API wants minutes
+  OFFMIN=$(python3 -c "import time; print(-time.altzone//60 if time.daylight else -time.timezone//60)")
+  curl -s -H "Authorization: Bearer $EBK_TOKEN" -H "X-Timezone-Name: $TZNAME" -H "X-Timezone-Offset: $OFFMIN" "$EBK_URL/api/v1/transactions/list/by_month.json?year=$2&month=$3&type=3" | head -c 4000; echo
+else
+  echo "Usage: expenses summary|add|ensure-ez" >&2; exit 1
+fi

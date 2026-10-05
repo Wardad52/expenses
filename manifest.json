@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.wardad52.expenses",
+  "name": "Expenses",
+  "version": "0.1.0",
+  "author": "Wardad52",
+  "license": "MIT",
+  "description": "Local expense tracker with manual entry, monthly totals by category. ezBookkeeping Docker sync optional.",
+  "kinds": ["bar-widget"],
+  "entryPoints": { "barWidget": "BarWidget.qml" },
+  "barWidget": {
+    "displayName": "Expenses",
+    "description": "Monthly spending totals.",
+    "category": "Finance",
+    "aliases": ["expenses", "spending", "receipts", "budget"],
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

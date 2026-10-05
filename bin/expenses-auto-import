@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# auto-import new receipt JPGs -> ezBookkeeping (tesseract OCR, heuristic parse)
+set -uo pipefail
+BASE="/home/warren/Documents/Workspaces/Financal plugin-workspace/Media_Receipts-images/2026 Receipts"
+DATA="${XDG_DATA_HOME:-$HOME/.local/share}/warren.expenses"
+CONF="$DATA/ez.conf"; LOG="$DATA/auto-import.log"; SEEN="$DATA/processed.dat"
+ATTN="$DATA/needs-attention.log"
+[ -f "$CONF" ] && . "$CONF"
+: "${EBK_TOKEN:?run expenses set-token first}"
+mkdir -p "$DATA"; touch "$SEEN"; : > "$ATTN.tmp"
+ACCT="3846510145777434624"
+declare -A CATS=( [Groceries]="3846513861192581120" [Fuel]="3846514795347968000" [Dining]="3846514795347968001" [Other]="3846514795347968002" )
+TZNAME="America/Anchorage"; TZOFF="-480"
+EBK_URL="${EBK_URL:-http://localhost:9400}"
+log(){ echo "$(date -Is) $*" >> "$LOG"; }
+attn(){ echo "$1" >> "$ATTN.tmp"; log "NEEDS-REVIEW $1"; }
+while IFS= read -r f; do
+  grep -qxF "$f" "$SEEN" && continue
+  txt=$(tesseract "$f" stdout 2>/dev/null || true)
+  # date: first MM/DD/YY(YY) match
+  dt=$(echo "$txt" | grep -oE '[0-9]{1,2}/[0-9]{1,2}/[0-9]{2,4}' | head -1)
+  datestr=""
+  if [ -n "$dt" ]; then
+    m=${dt%%/*}; rest=${dt#*/}; d=${rest%%/*}; y=${rest#*/}
+    [ ${#y} -eq 2 ] && y="20$y"
+    datestr=$(printf "%s-%02d-%02d" "$y" "$m" "$d")
+  fi
+  # amount: largest $ value near total/balance, else max
+  amt=$(echo "$txt" | grep -oiE '(total|balance|amount)[^0-9]*\$? ?[0-9]{1,4}\.[0-9]{2}' | grep -oE '[0-9]{1,4}\.[0-9]{2}' | sort -t. -k1,1n | tail -1)
+  [ -z "$amt" ] && amt=$(echo "$txt" | grep -oE '[0-9]{1,4}\.[0-9]{2}' | sort -t. -k1,1n | tail -1)
+  store=$(echo "$txt" | head -5 | tr '\n' ' ' | cut -c1-60 | sed 's/[^A-Za-z0-9 &.-]/ /g')
+  [ -z "$store" ] && store="Receipt"
+  cat="Other"
+  low=$(echo "$txt" | head -20 | tr 'A-Z' 'a-z')
+  if echo "$low" | grep -qiE 'fuel|gas|chevron|shell'; then cat="Fuel"
+  elif echo "$low" | grep -qiE 'pizza|restaurant|bakery|cafe|dining|cane|tooth'; then cat="Dining"
+  elif echo "$low" | grep -qiE 'costco|fred|meyer|target|bears|market|groc'; then cat="Groceries"
+  fi
+  if [ -z "$datestr" ] || [ -z "$amt" ]; then
+    attn "$(basename "$f") unreadable (date=$datestr amount=$amt) — left top-level for manual import"
+    echo "$f" >> "$SEEN"; continue
+  fi
+  cents=$(python3 -c "print(int(round(float('$amt')*100)))")
+  ts=$(date -d "$datestr 12:00" +%s)
+  # upload photo first (API needs lowercase extension)
+  cp "$f" /tmp/ez-up.jpg
+  up=$(curl -s -H "Authorization: Bearer $EBK_TOKEN" -X POST "$EBK_URL/api/v1/transaction/pictures/upload.json" -F "picture=@/tmp/ez-up.jpg")
+  pid=$(echo "$up" | python3 -c "import json,sys; print(json.load(sys.stdin).get('result',{}).get('pictureId',''))" 2>/dev/null)
+  if [ -n "$pid" ]; then picjson=",\"pictureIds\":[\"$pid\"]"; else picjson=""; fi
+  resp=$(curl -s -H "Authorization: Bearer $EBK_TOKEN" -H "Content-Type: application/json" -H "X-Timezone-Name: $TZNAME" -H "X-Timezone-Offset: $TZOFF" -X POST "$EBK_URL/api/v1/transactions/add.json" -d "{\"type\":3,\"categoryId\":\"${CATS[$cat]}\",\"time\":$ts,\"utcOffset\":-480,\"sourceAccountId\":\"$ACCT\",\"sourceAmount\":$cents$picjson,\"comment\":\"$store $datestr (auto)\"}")
+  if echo "$resp" | grep -q '"success":true'; then
+    log "IMPORTED $f $datestr $store $amt $cat"
+    mon=$(date -d "$datestr" +"%b Receipts")
+    mkdir -p "$BASE/$mon" && mv "$f" "$BASE/$mon/" 2>/dev/null || true
+  else
+    attn "$(basename "$f") ezBookkeeping rejected it ($datestr $store $amt) — left top-level"
+    log "FAILED $f $resp"
+  fi
+  echo "$f" >> "$SEEN"
+done < <(find "$BASE" -maxdepth 1 -iname "*.jpg" | sort)
+# notify if anything needs attention
+if [ -s "$ATTN.tmp" ]; then
+  mv "$ATTN.tmp" "$ATTN"
+  n=$(wc -l < "$ATTN")
+  first=$(head -1 "$ATTN")
+  notify-send -u critical "Expenses: $n receipt(s) need attention" "$first" 2>/dev/null || true
+else
+  rm -f "$ATTN.tmp"
+  : > "$ATTN"
+fi
+echo "done, see $LOG"
