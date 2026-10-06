@@ -59,7 +59,7 @@ elif [ "$cmd" = "ensure-ez" ]; then
   else
     echo "ezBookkeeping already running on :9400"
   fi
-  echo "1) Open http://localhost:9400, Register/login. 2) User Settings -> Security -> Generate Token (API). 3) Run: expenses set-token <TOKEN>"
+  echo "1) Open http://localhost:9400, Register/login. 2) User Settings -> Security -> Generate Token (API, pick 365 days expiry). 3) Run: expenses set-token <TOKEN>"
 elif [ "$cmd" = "sync" ]; then
   # push local entries missing in ezBookkeeping (match by comment)
   [ -f "$CONF" ] && . "$CONF"

@@ -35,7 +35,7 @@ docker run -d --name ezbookkeeping --restart unless-stopped -p 9400:8080 \
   -v ~/.local/share/ezbookkeeping/data:/ezbookkeeping/data \
   -v ~/.local/share/ezbookkeeping/storage:/ezbookkeeping/storage \
   mayswind/ezbookkeeping:latest
-# open http://localhost:9400, register, User Settings → Security → Generate API token, then:
+# open http://localhost:9400, register, User Settings → Security → Generate API token (pick 365 days expiry), then:
 ~/.config/omarchy/plugins/io.github.wardad52.expenses/bin/expenses set-token <TOKEN>
 ```
 
