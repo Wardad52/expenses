@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# ezb-status — check, restart, or recreate the local ezBookkeeping container.
+# Usage: ezb-status [status|restart|recreate]
+set -u
+
+URL="http://localhost:9400/"
+CONTAINER="ezbookkeeping"
+IMAGE="mayswind/ezbookkeeping:latest"
+
+status() {
+    echo "== container =="
+    docker ps -a --filter "name=^${CONTAINER}$" || return 1
+    echo
+    echo "== recent logs =="
+    docker logs --tail 15 "$CONTAINER" 2>&1
+    echo
+    code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$URL" 2>/dev/null || echo "000")
+    echo "== HTTP $URL -> $code =="
+    if [ "$code" = "200" ]; then
+        echo "OK — server is up. If your browser tab is spinning, hard-refresh it (Ctrl+Shift+R)."
+    else
+        echo "Server not responding. Try: $0 restart"
+    fi
+}
+
+restart() {
+    docker restart "$CONTAINER"
+}
+
+recreate() {
+    docker rm -f "$CONTAINER"
+    docker run -d --name "$CONTAINER" --restart unless-stopped -p 9400:8080 \
+        -e EBK_SECURITY_ENABLE_API_TOKEN=true \
+        -e EBK_SERVER_DOMAIN=localhost -e EBK_SERVER_ROOT_URL=http://localhost:9400/ \
+        -v ~/.local/share/ezbookkeeping/data:/ezbookkeeping/data \
+        -v ~/.local/share/ezbookkeeping/storage:/ezbookkeeping/storage \
+        "$IMAGE"
+}
+
+cmd="${1:-status}"
+case "$cmd" in
+    status) status ;;
+    restart) restart ;;
+    recreate) recreate ;;
+    *) echo "Usage: $0 [status|restart|recreate]" >&2; exit 1 ;;
+esac

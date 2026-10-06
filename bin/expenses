@@ -105,6 +105,34 @@ elif [ "$cmd" = "ez-month" ]; then
   # date +%z gives e.g. -0800 -> offset minutes = 480 ; API wants minutes
   OFFMIN=$(python3 -c "import time; print(-time.altzone//60 if time.daylight else -time.timezone//60)")
   curl -s -H "Authorization: Bearer $EBK_TOKEN" -H "X-Timezone-Name: $TZNAME" -H "X-Timezone-Offset: $OFFMIN" "$EBK_URL/api/v1/transactions/list/by_month.json?year=$2&month=$3&type=3" | head -c 4000; echo
+elif [ "$cmd" = "pull" ]; then
+  [ -f "$CONF" ] && . "$CONF"
+  : "${EBK_TOKEN:?run set-token first}"
+  key="${2:-$(date +%Y-%m)}"; Y=${key%-*}; M=${key#*-}; M=$((10#$M))
+  python3 - "$Y" "$M" <<PYEOF
+import json, os, sys, urllib.request, datetime
+base = os.path.expanduser("~/.local/share/warren.expenses")
+conf = dict(l.strip().split("=",1) for l in open(f"{base}/ez.conf"))
+token, url = conf["EBK_TOKEN"], conf.get("EBK_URL","http://localhost:9400")
+Y, M = int(sys.argv[1]), int(sys.argv[2])
+import time
+try: tz = __import__("subprocess").run(["timedatectl","show","-p","Timezone","--value"],capture_output=True,text=True).stdout.strip() or "America/Anchorage"
+except: tz = "America/Anchorage"
+off = str(-time.altzone//60 if time.daylight else -time.timezone//60)
+H = {"Authorization": f"Bearer {token}", "X-Timezone-Name": tz, "X-Timezone-Offset": off}
+req = urllib.request.Request(f"{url}/api/v1/transactions/list/by_month.json?year={Y}&month={M}&type=3", headers=H)
+items = json.load(urllib.request.urlopen(req)).get("result",{}).get("items",[])
+rev = {"Groceries":"Groceries","Fuel":"Fuel","Dining":"Dining"}
+entries = json.load(open(f"{base}/expenses.json"))
+entries = [e for e in entries if not str(e.get("date","")).startswith(f"{Y}-{M:02d}")]
+for t in items:
+    d = datetime.datetime.fromtimestamp(t["time"]).strftime("%Y-%m-%d")
+    cat = t.get("category",{}).get("name","Other")
+    cat = rev.get(cat, "Other")
+    entries.append({"date":d,"store":t.get("comment","")[:40],"amount":t.get("sourceAmount",0)/100,"category":cat})
+json.dump(entries, open(f"{base}/expenses.json","w"), indent=2)
+print(f"pulled {len(items)} from ezBookkeeping")
+PYEOF
 else
   echo "Usage: expenses summary|add|ensure-ez" >&2; exit 1
 fi

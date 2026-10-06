@@ -88,6 +88,16 @@ Panel {
     stdout: StdioCollector {}
     onExited: function (code) { loadMonth(); dateField.text = ""; storeField.text = ""; amountField.text = ""; }
   }
+  Process {
+    id: pullProc
+    command: []
+    stdout: StdioCollector {}
+    onExited: function (code) { loadMonth() }
+  }
+  function refreshFromEz() {
+    pullProc.command = ["bash", root.helper, "pull", root.month];
+    pullProc.running = true;
+  }
   function submit() {
     addProc.command = ["bash", root.helper, "add", dateField.text || new Date().toISOString().slice(0, 10), storeField.text || "Store", amountField.text || "0", catBox.currentText];
     addProc.running = true;
@@ -127,6 +137,7 @@ Panel {
         TextField { id: amountField; placeholderText: "Amount, e.g. 42.50 (new expense)"; inputMethodHints: Qt.ImhDigitsOnly; width: parent.width }
         ComboBox { id: catBox; model: ["Groceries", "Fuel", "Dining", "Other"]; width: parent.width }
         Button { text: "Add expense (local + sync to ezBookkeeping)"; width: parent.width; onClicked: submit() }
+        Button { text: "Refresh from ezBookkeeping"; width: parent.width; onClicked: refreshFromEz() }
         Text { text: "Add saves locally then pushes missing entries to ezBookkeeping :9400 (needs saved API token). Manual sync: `expenses sync`."; color: root.barForeground; opacity: 0.7; wrapMode: Text.WordWrap; width: parent.width; font.pixelSize: 11 }
       }
     }
