@@ -17,12 +17,14 @@ import json,sys
 f='$FILE'; key='$key'
 try: entries=json.load(open(f))
 except: entries=[]
-cats={'Groceries':0,'Fuel':0,'Dining':0,'Other':0}
+cats={'Food & Drink':0,'Clothing & Apparel':0,'Housing & Houseware':0,'Transportation':0,'Auto/Fuel':0,'Vacation':0,'Coms':0,'Entertainment':0,'Education':0,'Gifts & Donate':0,'Medical':0,'Finance & Insurance':0,'Misc':0}
 total=0; count=0
+legacy={'Groceries':'Food & Drink','Fuel':'Auto/Fuel','Dining':'Food & Drink','Other':'Misc'}
 for e in entries:
   if str(e.get('date',''))[:7]!=key: continue
-  c=e.get('category','Other')
-  if c not in cats: c='Other'
+  c=e.get('category','Misc')
+  c=legacy.get(c,c)
+  if c not in cats: c='Misc'
   try: a=float(e.get('amount',0))
   except: a=0
   cats[c]+=a; total+=a; count+=1
@@ -51,6 +53,35 @@ entries.append({'date':sys.argv[1],'store':sys.argv[2],'amount':float(sys.argv[3
 json.dump(entries,open(f,'w'),indent=2)
 print('ok')
 " "$2" "$3" "$4" "$5"
+elif [ "$cmd" = "add-income" ]; then
+  [ -f "$CONF" ] && . "$CONF"
+  : "${EBK_TOKEN:?run set-token first}"
+  python3 - "$2" "$3" "$4" <<'PYEOF'
+import json, sys, os, subprocess, datetime
+base = os.path.expanduser("~/.local/share/warren.expenses")
+conf = dict(l.strip().split("=",1) for l in open(f"{base}/ez.conf"))
+token, url = conf["EBK_TOKEN"], conf.get("EBK_URL","http://localhost:9400")
+date, source, amt = sys.argv[1], sys.argv[2], float(sys.argv[3])
+inc = os.path.join(base, "income.json")
+try: rows = json.load(open(inc))
+except: rows = []
+rows.append({"date":date,"source":source,"amount":amt})
+json.dump(rows, open(inc,"w"), indent=2)
+dt = datetime.datetime.strptime(date,"%Y-%m-%d"); ts = int(dt.replace(hour=12).timestamp())
+body = json.dumps({"type":2,"categoryId":"3846518817584840704","time":ts,"utcOffset":-480,"sourceAccountId":"3846510145777434624","sourceAmount":int(round(amt*100)),"comment":f"{source} {date} (income)"})
+r = subprocess.run(["curl","-s","-H",f"Authorization: Bearer {token}","-H","Content-Type: application/json","-H","X-Timezone-Name: America/Anchorage","-H","X-Timezone-Offset: -480","-X","POST",f"{url}/api/v1/transactions/add.json","-d",body],capture_output=True,text=True).stdout
+print(r[:300] if '"success":true' not in r else "ok")
+PYEOF
+elif [ "$cmd" = "income-summary" ]; then
+  key="${2:-$(date +%Y-%m)}"
+  python3 -c "
+import json
+f='$DIR/income.json'; key='$key'
+try: rows=json.load(open(f))
+except: rows=[]
+t=sum(float(r.get('amount',0)) for r in rows if str(r.get('date',''))[:7]==key)
+print(json.dumps({'month':key,'total':round(t,2),'count':sum(1 for r in rows if str(r.get('date',''))[:7]==key)}))
+"
 elif [ "$cmd" = "ensure-ez" ]; then
   if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q ezbookkeeping; then
     echo "Starting ezBookkeeping (Docker) with API tokens enabled..."
@@ -72,16 +103,26 @@ token = conf["EBK_TOKEN"]; url = conf.get("EBK_URL","http://localhost:9400")
 H = {"Authorization": f"Bearer {token}", "X-Timezone-Name": "America/Anchorage", "X-Timezone-Offset": "-480"}
 req = urllib.request.Request(f"{url}/api/v1/transactions/list/all.json?start_time=1700000000&end_time=1800000000", headers=H)
 have = set(t.get("comment","") for t in json.load(urllib.request.urlopen(req)).get("result",[]))
-catmap = {"Groceries":"3846513861192581120","Fuel":"3846514795347968000","Dining":"3846514795347968001","Other":"3846514795347968002"}
+ezkeys = set()
+for _t in json.load(urllib.request.urlopen(req)).get("result",[]):
+    try: _d = datetime.datetime.fromtimestamp(_t.get("time",0)).strftime("%Y-%m-%d")
+    except: _d = ""
+    try: _a = int(_t.get("sourceAmount",0) or 0)
+    except: _a = 0
+    ezkeys.add((_a, _d))
+catmap = {"Food & Drink":"3846513861192581120","Clothing & Apparel":"3846513219094970382","Housing & Houseware":"3846513219094970386","Transportation":"3846513219094970394","Auto/Fuel":"3846514795347968000","Vacation":"3846528251480506368","Coms":"3846513219094970397","Entertainment":"3846513219094970402","Education":"3846513219094970408","Gifts & Donate":"3846513219094970410","Medical":"3846513219094970412","Finance & Insurance":"3846513219094970417","Misc":"3846514795347968002","Groceries":"3846513861192581120","Fuel":"3846514795347968000","Dining":"3846514795347968001","Other":"3846514795347968002"}
 incat = "3846518817584840704"; acct = "3846510145777434624"
 entries = json.load(open(f"{base}/expenses.json"))
 ok=skip=fail=0
 for e in entries:
     amt = float(e.get("amount",0))
     if amt == 0: continue
-    comment = f"{e.get('store','')} {e.get('date','')}"
-    if comment in have or f"Refund: {comment}" in have: skip+=1; continue
-    dt = datetime.datetime.strptime(e["date"],"%Y-%m-%d"); ts = int(dt.replace(hour=12).timestamp())
+    try: normdate = datetime.datetime.strptime(e["date"],"%Y-%m-%d").strftime("%Y-%m-%d")
+    except: normdate = e.get("date","")
+    comment = f"{e.get('store','')} {normdate}"
+    cents = int(round(amt*100))
+    if comment in have or f"{comment} (auto)" in have or f"Refund: {comment}" in have or (cents, normdate) in ezkeys: skip+=1; continue
+    dt = datetime.datetime.strptime(normdate,"%Y-%m-%d"); ts = int(dt.replace(hour=12).timestamp())
     if amt < 0:
         body = json.dumps({"type":2,"categoryId":incat,"time":ts,"utcOffset":-480,"sourceAccountId":acct,"sourceAmount":int(round(abs(amt)*100)),"comment":f"Refund: {comment}"})
     else:
@@ -122,14 +163,17 @@ off = str(-time.altzone//60 if time.daylight else -time.timezone//60)
 H = {"Authorization": f"Bearer {token}", "X-Timezone-Name": tz, "X-Timezone-Offset": off}
 req = urllib.request.Request(f"{url}/api/v1/transactions/list/by_month.json?year={Y}&month={M}&type=3", headers=H)
 items = json.load(urllib.request.urlopen(req)).get("result",{}).get("items",[])
-rev = {"Groceries":"Groceries","Fuel":"Fuel","Dining":"Dining"}
+rev = {"Groceries":"Food & Drink","Fuel":"Auto/Fuel","Dining":"Food & Drink","Clothing & Appearance":"Clothing & Apparel","Communication":"Coms","Education & Studying":"Education","Gifts & Donations":"Gifts & Donate","Medical & Healthcare":"Medical","Miscellaneous":"Misc","Other Expense":"Misc","Other":"Misc"}
 entries = json.load(open(f"{base}/expenses.json"))
 entries = [e for e in entries if not str(e.get("date","")).startswith(f"{Y}-{M:02d}")]
 for t in items:
     d = datetime.datetime.fromtimestamp(t["time"]).strftime("%Y-%m-%d")
     cat = t.get("category",{}).get("name","Other")
-    cat = rev.get(cat, "Other")
-    entries.append({"date":d,"store":t.get("comment","")[:40],"amount":t.get("sourceAmount",0)/100,"category":cat})
+    cat = rev.get(cat, cat)
+    if cat == "Other": cat = "Misc"
+    import re as _re
+    _store = _re.sub(r"\s+\d{4}-\d{1,2}-\d{1,2}(\s+\(auto\))?$", "", t.get("comment","")).strip()[:40] or "Store"
+    entries.append({"date":d,"store":_store,"amount":t.get("sourceAmount",0)/100,"category":cat})
 json.dump(entries, open(f"{base}/expenses.json","w"), indent=2)
 print(f"pulled {len(items)} from ezBookkeeping")
 PYEOF

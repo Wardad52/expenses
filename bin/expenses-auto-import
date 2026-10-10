@@ -9,13 +9,15 @@ ATTN="$DATA/needs-attention.log"
 : "${EBK_TOKEN:?run expenses set-token first}"
 mkdir -p "$DATA"; touch "$SEEN"; : > "$ATTN.tmp"
 ACCT="3846510145777434624"
-declare -A CATS=( [Groceries]="3846513861192581120" [Fuel]="3846514795347968000" [Dining]="3846514795347968001" [Other]="3846514795347968002" )
+declare -A CATS=( ["Food & Drink"]="3846513861192581120" ["Clothing & Apparel"]="3846513219094970382" ["Housing & Houseware"]="3846513219094970386" ["Transportation"]="3846513219094970394" ["Auto/Fuel"]="3846514795347968000" ["Vacation"]="3846528251480506368" ["Coms"]="3846513219094970397" ["Entertainment"]="3846513219094970402" ["Education"]="3846513219094970408" ["Gifts & Donate"]="3846513219094970410" ["Medical"]="3846513219094970412" ["Finance & Insurance"]="3846513219094970417" ["Misc"]="3846514795347968002" )
 TZNAME="America/Anchorage"; TZOFF="-480"
 EBK_URL="${EBK_URL:-http://localhost:9400}"
 log(){ echo "$(date -Is) $*" >> "$LOG"; }
 attn(){ echo "$1" >> "$ATTN.tmp"; log "NEEDS-REVIEW $1"; }
 while IFS= read -r f; do
   grep -qxF "$f" "$SEEN" && continue
+  # bake EXIF rotation into pixels so tesseract sees upright text
+  command -v mogrify >/dev/null 2>&1 && mogrify -auto-orient "$f" 2>/dev/null || true
   txt=$(tesseract "$f" stdout 2>/dev/null || true)
   # date: first MM/DD/YY(YY) match
   dt=$(echo "$txt" | grep -oE '[0-9]{1,2}/[0-9]{1,2}/[0-9]{2,4}' | head -1)
@@ -28,21 +30,21 @@ while IFS= read -r f; do
     fi
   fi
   if [ -z "$datestr" ]; then datestr=$(stat -c %y "$f" | cut -d' ' -f1); log "DATE-FALLBACK $f -> $datestr"; fi
+  # hard validation: reject impossible dates (e.g. day 00 from OCR garbage) -> file mtime
+  if ! date -d "$datestr 12:00" +%s >/dev/null 2>&1; then datestr=$(stat -c %y "$f" | cut -d' ' -f1); log "DATE-INVALID-FALLBACK $f -> $datestr"; fi
   # amount: largest $ value near total/balance, else max
   amt=$(echo "$txt" | grep -oiE '(total|balance|amount)[^0-9]*\$? ?[0-9]{1,4}\.[0-9]{2}' | grep -oE '[0-9]{1,4}\.[0-9]{2}' | sort -t. -k1,1n | tail -1)
   [ -z "$amt" ] && amt=$(echo "$txt" | grep -oE '[0-9]{1,4}\.[0-9]{2}' | sort -t. -k1,1n | tail -1)
   store=$(echo "$txt" | head -5 | tr '\n' ' ' | cut -c1-60 | sed 's/[^A-Za-z0-9 &.-]/ /g')
   [ -z "$store" ] && store="Receipt"
-  cat="Other"
+  cat="Misc"
   low=$(echo "$txt" | head -20 | tr 'A-Z' 'a-z')
-  if echo "$low" | grep -qiE 'fuel|gas|chevron|shell'; then cat="Fuel"
-  elif echo "$low" | grep -qiE 'pizza|restaurant|bakery|cafe|dining|cane|tooth'; then cat="Dining"
-  elif echo "$low" | grep -qiE 'costco|fred|meyer|target|bears|market|groc'; then cat="Groceries"
+  if echo "$low" | grep -qiE 'fuel|gas|chevron|shell'; then cat="Auto/Fuel"
+  elif echo "$low" | grep -qiE 'pizza|restaurant|bakery|cafe|dining|cane|tooth'; then cat="Food & Drink"
+  elif echo "$low" | grep -qiE 'costco|fred|meyer|target|bears|market|groc'; then cat="Food & Drink"
   fi
-  if [ -z "$datestr" ] || [ -z "$amt" ]; then
-    attn "$(basename "$f") unreadable (date=$datestr amount=$amt) — left top-level for manual import"
-    echo "$f" >> "$SEEN"; continue
-  fi
+  needs_review=""
+  if [ -z "$amt" ]; then amt="0.00"; needs_review=" NEEDS-REVIEW"; log "AMOUNT-FALLBACK $f -> 0.00 (will review in ezBookkeeping)"; fi
   cents=$(python3 -c "print(int(round(float('$amt')*100)))")
   ts=$(date -d "$datestr 12:00" +%s)
   # upload photo first (API needs lowercase extension)
@@ -50,9 +52,10 @@ while IFS= read -r f; do
   up=$(curl -s -H "Authorization: Bearer $EBK_TOKEN" -X POST "$EBK_URL/api/v1/transaction/pictures/upload.json" -F "picture=@/tmp/ez-up.jpg")
   pid=$(echo "$up" | python3 -c "import json,sys; print(json.load(sys.stdin).get('result',{}).get('pictureId',''))" 2>/dev/null)
   if [ -n "$pid" ]; then picjson=",\"pictureIds\":[\"$pid\"]"; else picjson=""; fi
-  resp=$(curl -s -H "Authorization: Bearer $EBK_TOKEN" -H "Content-Type: application/json" -H "X-Timezone-Name: $TZNAME" -H "X-Timezone-Offset: $TZOFF" -X POST "$EBK_URL/api/v1/transactions/add.json" -d "{\"type\":3,\"categoryId\":\"${CATS[$cat]}\",\"time\":$ts,\"utcOffset\":-480,\"sourceAccountId\":\"$ACCT\",\"sourceAmount\":$cents$picjson,\"comment\":\"$store $datestr (auto)\"}")
+  resp=$(curl -s -H "Authorization: Bearer $EBK_TOKEN" -H "Content-Type: application/json" -H "X-Timezone-Name: $TZNAME" -H "X-Timezone-Offset: $TZOFF" -X POST "$EBK_URL/api/v1/transactions/add.json" -d "{\"type\":3,\"categoryId\":\"${CATS[$cat]}\",\"time\":$ts,\"utcOffset\":-480,\"sourceAccountId\":\"$ACCT\",\"sourceAmount\":$cents$picjson,\"comment\":\"$store $datestr (auto$needs_review)\"}")
   if echo "$resp" | grep -q '"success":true'; then
-    log "IMPORTED $f $datestr $store $amt $cat"
+    log "IMPORTED $f $datestr $store $amt $cat$needs_review"
+    [ -n "$needs_review" ] && attn "$(basename "$f") imported as $amt — review amount in ezBookkeeping"
     mon=$(date -d "$datestr" +"%b Receipts")
     mkdir -p "$BASE/$mon" && mv "$f" "$BASE/$mon/" 2>/dev/null || true
   else
