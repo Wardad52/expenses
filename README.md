@@ -1,8 +1,10 @@
 # Expenses
 
-Monthly expense tracker for the Omarchy bar. Manual entry with Groceries / Fuel / Dining / Other categories, monthly totals with ◀ ▶ month browsing, and optional sync to a local [ezBookkeeping](https://ezbookkeeping.mayswind.net/) Docker container (including receipt photos).
+Monthly expense tracker for the Omarchy bar. Manual entry with 13 categories, monthly totals with ◀ ▶ month browsing, income tracking, and optional sync to a local [ezBookkeeping](https://ezbookkeeping.mayswind.net/) Docker container (including receipt photos).
 
 ![Widget panel](preview.png)
+
+![Expense list, manual entry, and income section](docs/panel-entries.png)
 
 ![ezBookkeeping transaction list with synced receipts](docs/ezbookkeeping.png)
 
