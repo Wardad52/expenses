@@ -86,7 +86,7 @@ elif [ "$cmd" = "ensure-ez" ]; then
   if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q ezbookkeeping; then
     echo "Starting ezBookkeeping (Docker) with API tokens enabled..."
     docker rm -f ezbookkeeping 2>/dev/null || true
-    docker run -d --name ezbookkeeping --restart unless-stopped -p 9400:8080 -e EBK_SECURITY_ENABLE_API_TOKEN=true mayswind/ezbookkeeping:latest 2>&1 || echo "NOTE: run this from a terminal in the docker group. Local JSON still works."
+    docker run -d --name ezbookkeeping --restart unless-stopped -p 127.0.0.1:9400:8080 -e EBK_SECURITY_ENABLE_API_TOKEN=true mayswind/ezbookkeeping:latest 2>&1 || echo "NOTE: run this from a terminal in the docker group. Local JSON still works."
   else
     echo "ezBookkeeping already running on :9400"
   fi

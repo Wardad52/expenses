@@ -31,7 +31,7 @@ omarchy-shell shell rescanPlugins
 ## ezBookkeeping setup (optional, local Docker)
 
 ```sh
-docker run -d --name ezbookkeeping --restart unless-stopped -p 9400:8080 \
+docker run -d --name ezbookkeeping --restart unless-stopped -p 127.0.0.1:9400:8080 \
   -e EBK_SECURITY_ENABLE_API_TOKEN=true \
   -e EBK_SERVER_DOMAIN=localhost -e EBK_SERVER_ROOT_URL=http://localhost:9400/ \
   -v ~/.local/share/ezbookkeeping/data:/ezbookkeeping/data \
