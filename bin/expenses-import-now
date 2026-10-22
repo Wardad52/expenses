@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Run receipt auto-import on demand (keybinding) and show a desktop notification
+set -uo pipefail
+PLUGIN="$HOME/.config/omarchy/plugins/io.github.wardad52.expenses/bin"
+DATA="${XDG_DATA_HOME:-$HOME/.local/share}/warren.expenses"
+LOG="$DATA/auto-import.log"
+mkdir -p "$DATA"; touch "$LOG"
+
+# don't stack with the every-minute timer run
+exec 9>"$DATA/import.lock"
+if ! flock -n 9; then
+  notify-send -u normal "Expenses" "Receipt import already running" 2>/dev/null || true
+  exit 0
+fi
+
+before=$(wc -l < "$LOG" 2>/dev/null || echo 0)
+"$PLUGIN/expenses-auto-import" >/dev/null 2>&1
+rc=$?
+
+new=$(tail -n +"$((before + 1))" "$LOG" 2>/dev/null || true)
+imported=$(grep -c ' IMPORTED ' <<<"$new" || true)
+failed=$(grep -cE ' (FAILED|NEEDS-REVIEW) ' <<<"$new" || true)
+
+if [ "$rc" -ne 0 ]; then
+  notify-send -u critical "Expenses import failed" "See $LOG" 2>/dev/null || true
+elif [ "$imported" -eq 0 ] && [ "$failed" -eq 0 ]; then
+  notify-send "Expenses" "No new receipts found" 2>/dev/null || true
+else
+  msg="$imported receipt(s) imported"
+  [ "$failed" -gt 0 ] && msg="$msg, $failed need attention"
+  notify-send -u normal "Expenses: $msg" "See $LOG" 2>/dev/null || true
+fi

@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Print a PDF through a cleaning pass (Ghostscript) to strip malformed
+# annotations that crash CUPS' pdftopdf filter (Brave/Chromium print PDFs).
+# Usage: pdf-print-clean [printer] <file.pdf>
+set -euo pipefail
+
+PRINTER="EPSON-ET-4760-Series"
+if [[ $# -gt 1 ]]; then PRINTER="$1"; shift; fi
+if [[ $# -ne 1 ]]; then echo "Usage: $(basename "$0") [printer] <file.pdf>" >&2; exit 2; fi
+file="$1"
+[[ -f "$file" ]] || { echo "No such file: $file" >&2; exit 2; }
+
+clean="/tmp/opencode/pdf-print-clean-$(basename "$file" | sed 's/[ Editors]/_/g').pdf"
+if gs -q -dNOPAUSE -dBATCH -sDEVICE=pdfwrite -dCompatibilityLevel=1.7 \
+      -dPDFSETTINGS=/printer -sOutputFile="$clean" "$file"; then
+  lp -d "$PRINTER" "$clean"
+else
+  echo "Cleaning failed; submitting original directly." >&2
+  lp -d "$PRINTER" "$file"
+fi
