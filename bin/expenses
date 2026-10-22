@@ -38,7 +38,7 @@ f='$FILE'; key='$key'
 try: entries=json.load(open(f))
 except: entries=[]
 rows=[e for e in entries if str(e.get('date',''))[:7]==key]
-rows.sort(key=lambda e: e.get('date',''))
+rows.sort(key=lambda e: e.get('date',''), reverse=True)
 for e in rows[:15]:
   print(f\"{e.get('date','')} {e.get('store','')[:22]} \${e.get('amount',0)} [{e.get('category','')[:4]}]\")
 if len(rows)>15: print(f'...+{len(rows)-15} more')
@@ -46,10 +46,22 @@ if not rows: print('')
 "
 elif [ "$cmd" = "add" ]; then
   python3 -c "
-import json,sys
+import json,sys,datetime,re
 f='$FILE'
+def norm(d):
+    d = (d or '').strip()
+    for fmt in ('%Y-%m-%d','%m/%d/%Y','%m-%d-%Y','%Y/%m/%d','%m.%d.%Y'):
+        try: return datetime.datetime.strptime(d,fmt).strftime('%Y-%m-%d')
+        except ValueError: pass
+    # bare MMDDYYYY / YYYYMMDD digits
+    dig = re.sub(r'\D','',d)
+    if len(dig)==8:
+        for fmt in ('%Y%m%d','%m%d%Y'):
+            try: return datetime.datetime.strptime(dig,fmt).strftime('%Y-%m-%d')
+            except ValueError: pass
+    print(f'bad date (use YYYY-MM-DD): {d!r}', file=sys.stderr); sys.exit(1)
 entries=json.load(open(f))
-entries.append({'date':sys.argv[1],'store':sys.argv[2],'amount':float(sys.argv[3]),'category':sys.argv[4]})
+entries.append({'date':norm(sys.argv[1]),'store':sys.argv[2],'amount':float(sys.argv[3]),'category':sys.argv[4]})
 json.dump(entries,open(f,'w'),indent=2)
 print('ok')
 " "$2" "$3" "$4" "$5"
@@ -68,7 +80,7 @@ except: rows = []
 rows.append({"date":date,"source":source,"amount":amt})
 json.dump(rows, open(inc,"w"), indent=2)
 dt = datetime.datetime.strptime(date,"%Y-%m-%d"); ts = int(dt.replace(hour=12).timestamp())
-body = json.dumps({"type":2,"categoryId":"3846518817584840704","time":ts,"utcOffset":-480,"sourceAccountId":"3846510145777434624","sourceAmount":int(round(amt*100)),"comment":f"{source} {date} (income)"})
+body = json.dumps({"type":2,"categoryId":"3847600000000000002","time":ts,"utcOffset":-480,"sourceAccountId":"3847600000000000003","sourceAmount":int(round(amt*100)),"comment":f"{source} {date} (income)"})
 r = subprocess.run(["curl","-s","-H",f"Authorization: Bearer {token}","-H","Content-Type: application/json","-H","X-Timezone-Name: America/Anchorage","-H","X-Timezone-Offset: -480","-X","POST",f"{url}/api/v1/transactions/add.json","-d",body],capture_output=True,text=True).stdout
 print(r[:300] if '"success":true' not in r else "ok")
 PYEOF
@@ -110,15 +122,26 @@ for _t in json.load(urllib.request.urlopen(req)).get("result",[]):
     try: _a = int(_t.get("sourceAmount",0) or 0)
     except: _a = 0
     ezkeys.add((_a, _d))
-catmap = {"Food & Drink":"3846513861192581120","Clothing & Apparel":"3846513219094970382","Housing & Houseware":"3846513219094970386","Transportation":"3846513219094970394","Auto/Fuel":"3846514795347968000","Vacation":"3846528251480506368","Coms":"3846513219094970397","Entertainment":"3846513219094970402","Education":"3846513219094970408","Gifts & Donate":"3846513219094970410","Medical":"3846513219094970412","Finance & Insurance":"3846513219094970417","Misc":"3846514795347968002","Groceries":"3846513861192581120","Fuel":"3846514795347968000","Dining":"3846514795347968001","Other":"3846514795347968002"}
+catmap = {"Food & Drink":"3846513861192581120","Clothing & Apparel":"3846513219094970382","Housing & Houseware":"3846513219094970386","Transportation":"3846513219094970394","Auto/Fuel":"3846514795347968000","Vacation":"3846529799816216576","Coms":"3846513219094970397","Entertainment":"3846513219094970402","Education":"3846513219094970408","Gifts & Donate":"3846513219094970410","Medical":"3846513219094970412","Finance & Insurance":"3846513219094970417","Misc":"3846514795347968002","Groceries":"3846513861192581120","Fuel":"3846514795347968000","Dining":"3846514795347968001","Other":"3846514795347968002"}
 incat = "3846518817584840704"; acct = "3846510145777434624"
 entries = json.load(open(f"{base}/expenses.json"))
-ok=skip=fail=0
+ok=skip=fail=bad=0
 for e in entries:
-    amt = float(e.get("amount",0))
+    try: amt = float(e.get("amount",0))
+    except (TypeError, ValueError):
+        bad+=1; print(f"SKIP bad amount: {e!r}"[:150]); continue
     if amt == 0: continue
-    try: normdate = datetime.datetime.strptime(e["date"],"%Y-%m-%d").strftime("%Y-%m-%d")
-    except: normdate = e.get("date","")
+    rawdate = str(e.get("date","")).strip()
+    digits = "".join(c for c in rawdate if c.isdigit())
+    normdate = ""
+    for cand, fmts in ((rawdate, ("%Y-%m-%d","%m/%d/%Y","%m-%d-%Y","%Y/%m/%d","%m.%d.%Y")),
+                       (digits, ("%Y%m%d","%m%d%Y"))):
+        for fmt in fmts:
+            try: normdate = datetime.datetime.strptime(cand,fmt).strftime("%Y-%m-%d"); break
+            except ValueError: pass
+        if normdate: break
+    if not normdate:
+        bad+=1; print(f"SKIP bad date: {e!r}"[:150]); continue
     comment = f"{e.get('store','')} {normdate}"
     cents = int(round(amt*100))
     if comment in have or f"{comment} (auto)" in have or f"Refund: {comment}" in have or (cents, normdate) in ezkeys: skip+=1; continue
@@ -130,7 +153,7 @@ for e in entries:
     r = subprocess.run(["curl","-s","-H",f"Authorization: Bearer {token}","-H","Content-Type: application/json","-H","X-Timezone-Name: America/Anchorage","-H","X-Timezone-Offset: -480","-X","POST",f"{url}/api/v1/transactions/add.json","-d",body],capture_output=True,text=True).stdout
     if '"success":true' in r: ok+=1
     else: fail+=1; print("FAIL",comment,r[:150])
-print(f"synced={ok} already={skip} failed={fail}")
+print(f"synced={ok} already={skip} failed={fail} bad={bad}")
 PYEOF
 elif [ "$cmd" = "attention" ]; then
   F="$DIR/needs-attention.log"

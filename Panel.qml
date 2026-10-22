@@ -23,7 +23,9 @@ Panel {
   property var income: ({ total: 0, count: 0 })
   property bool showCatPage: false
   property var checkedCats: []
+  property bool showIncome: false
   property string checkedText: ""
+  property string lastSync: ""
   function updateCheckedText() {
     var bc = root.summary.by_category || {};
     var parts = [];
@@ -31,9 +33,13 @@ Panel {
       var c = root.checkedCats[i];
       parts.push(c + " $" + (bc[c] || 0));
     }
+    if (root.showIncome)
+      parts.push("Income $" + (root.income.total || 0));
     root.checkedText = parts.join(" · ") || "No categories checked";
   }
   onCheckedCatsChanged: updateCheckedText()
+  onShowIncomeChanged: updateCheckedText()
+  onIncomeChanged: updateCheckedText()
   onSummaryChanged: updateCheckedText()
   Component.onCompleted: refresh()
   onOpenedChanged: if (opened) refresh()
@@ -97,13 +103,42 @@ Panel {
     id: addProc
     command: []
     stdout: StdioCollector {}
-    onExited: function (code) { syncProc.command = ["bash", root.helper, "sync"]; syncProc.running = true; }
+    stderr: StdioCollector {}
+    onExited: function (code) {
+      var err = String(stderr.text).trim();
+      if (code !== 0) {
+        root.lastSync = "Add failed: " + (err || String(stdout.text).trim() || ("exit " + code));
+        loadMonth();
+        return;
+      }
+      root.lastSync = "Saved locally, syncing…";
+      syncProc.command = ["bash", root.helper, "sync"];
+      syncProc.running = true;
+    }
   }
   Process {
     id: syncProc
     command: []
     stdout: StdioCollector {}
-    onExited: function (code) { loadMonth(); dateField.text = ""; storeField.text = ""; amountField.text = ""; }
+    stderr: StdioCollector {}
+    onExited: function (code) {
+      var lines = String(stdout.text).trim().split("\n").filter(function (l) { return l.length > 0; });
+      var summary = lines.length > 0 ? lines[lines.length - 1] : "";
+      var problems = lines.filter(function (l) { return l.indexOf("FAIL") === 0 || l.indexOf("SKIP") === 0; }).slice(0, 3);
+      if (code !== 0) {
+        root.lastSync = "Sync error (exit " + code + "): " + (String(stderr.text).trim() || summary).slice(0, 160);
+      } else if (/failed=[1-9]|bad=[1-9]/.test(summary)) {
+        root.lastSync = "⚠ " + summary + (problems.length > 0 ? "\n" + problems.join("\n") : "");
+      } else if (summary) {
+        root.lastSync = "✓ " + summary;
+      } else {
+        root.lastSync = "Sync finished, no output.";
+      }
+      loadMonth();
+      dateField.text = "";
+      storeField.text = "";
+      amountField.text = "";
+    }
   }
   Process {
     id: incProc
@@ -130,6 +165,7 @@ Panel {
     pullProc.running = true;
   }
   function submit() {
+    root.lastSync = "Saving…";
     addProc.command = ["bash", root.helper, "add", dateField.text || new Date().toISOString().slice(0, 10), storeField.text || "Store", amountField.text || "0", catBox.currentText];
     addProc.running = true;
   }
@@ -148,14 +184,19 @@ Panel {
     open: root.opened
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(320))
-    contentHeight: panel.fittedContentHeight(content.implicitHeight)
+    contentHeight: panel.fittedContentHeight(content.implicitHeight, Style.space(600))
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
-      onCloseRequested: root.close()
-      Column {
-        id: content
-        width: parent.width
+      ScrollView {
+        id: scrollArea
+        anchors.fill: parent
+        clip: true
+        ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+        ScrollBar.vertical.policy: ScrollBar.AlwaysOn
+        Column {
+          id: content
+          width: scrollArea.availableWidth
         spacing: Style.space(8)
         RowLayout {
           width: parent.width
@@ -173,8 +214,8 @@ Panel {
         TextField { id: amountField; placeholderText: "Amount, e.g. 42.50 (new expense)"; inputMethodHints: Qt.ImhDigitsOnly; width: parent.width; visible: !root.showCatPage }
         ComboBox { id: catBox; model: ["Food & Drink", "Clothing & Apparel", "Housing & Houseware", "Transportation", "Auto/Fuel", "Vacation", "Coms", "Entertainment", "Education", "Gifts & Donate", "Medical", "Finance & Insurance", "Misc"]; width: parent.width; visible: !root.showCatPage }
         Button { text: "Add expense (local + sync to ezBookkeeping)"; width: parent.width; onClicked: submit(); visible: !root.showCatPage }
+        Text { text: root.lastSync; width: parent.width; wrapMode: Text.WordWrap; font.pixelSize: 12; visible: !root.showCatPage && root.lastSync.length > 0; color: (root.lastSync.indexOf("⚠") === 0 || root.lastSync.indexOf("failed") >= 0 || root.lastSync.indexOf("Add failed") === 0 || root.lastSync.indexOf("Sync error") === 0) ? "#ff9d5c" : root.barForeground; opacity: 0.9 }
         Button { text: "Refresh from ezBookkeeping"; width: parent.width; onClicked: refreshFromEz(); visible: !root.showCatPage }
-        Text { text: "Income this month: $" + (root.income.total || 0) + " (" + (root.income.count || 0) + ")"; color: root.barForeground; font.bold: true; visible: !root.showCatPage }
         TextField { id: incDate; placeholderText: "Date YYYY-MM-DD (income)"; width: parent.width; visible: !root.showCatPage }
         TextField { id: incSource; placeholderText: "Source, e.g. Paycheck"; width: parent.width; visible: !root.showCatPage }
         TextField { id: incAmount; placeholderText: "Amount, e.g. 1250.00 (income)"; inputMethodHints: Qt.ImhDigitsOnly; width: parent.width; visible: !root.showCatPage }
@@ -197,6 +238,13 @@ Panel {
           }
         }
         Button { text: "◀ Back"; width: parent.width; visible: root.showCatPage; onClicked: root.showCatPage = false }
+        CheckBox {
+          visible: root.showCatPage
+          text: "Income $" + (root.income.total || 0)
+          checked: root.showIncome
+          onToggled: root.showIncome = checked
+        }
+        }
       }
     }
   }
