@@ -26,7 +26,7 @@ omarchy-shell shell rescanPlugins
 - Click the `$` widget: shows current-month total · count. `⚠N` prefix means N receipts need attention.
 - ◀ ▶ browse past months (local data). Transaction list shows first 15 rows.
 - Add new expense: fill Date / Store / Amount, pick category, click Add (saves locally, then auto-syncs to ezBookkeeping if an API token is saved).
-- Receipt photos: drop JPGs directly in your receipts folder; `bin/expenses-auto-import` (every 5 min via systemd timer) OCRs, pushes with photo, and files them. Failures notify + persist in the widget.
+- Receipt photos: drop JPGs/PDFs in your receipts folder; `bin/expenses-auto-import` (every minute via systemd timer) OCRs, pushes with photo, and files them. Failures notify + persist in the widget. Re-saved receipts with a duplicate name get flagged with a persistent, clickable toast (details in the guide's auto-import section).
 
 ## ezBookkeeping setup (optional, local Docker)
 
@@ -42,6 +42,13 @@ docker run -d --name ezbookkeeping --restart unless-stopped -p 127.0.0.1:9400:80
 ```
 
 Manual sync anytime: `bin/expenses sync`.
+
+## Docs
+
+- [docs/expenses-guide.md](docs/expenses-guide.md) — full guide: how ezBookkeeping works first-run to reconcile, plus the auto-import and duplicate-name-toast sections
+- [docs/troubleshooting.md](docs/troubleshooting.md) — status/restart/recreate order and the auto-import pipeline internals
+- [docs/receipt-photos.md](docs/receipt-photos.md) — how to shoot receipts for clean OCR + category mapping
+- [docs/links.md](docs/links.md) — official ezBookkeeping links
 
 ## Remove
 
