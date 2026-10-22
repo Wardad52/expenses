@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
 # auto-import new receipt JPGs -> ezBookkeeping (tesseract OCR, heuristic parse)
 set -uo pipefail
-BASE="/home/warren/Documents/Workspaces/Financal plugin-workspace/Media_Receipts-images/2026 Receipts"
+BASE="/home/warren/Projects/Financal plugin-workspace/assets/receipts/2026 Receipts"
 DATA="${XDG_DATA_HOME:-$HOME/.local/share}/warren.expenses"
 CONF="$DATA/ez.conf"; LOG="$DATA/auto-import.log"; SEEN="$DATA/processed.dat"
 ATTN="$DATA/needs-attention.log"
+# duplicate receipt names: current set + re-nag pacing
+DUPES="$DATA/dupes.log"; DUPNEW="$DATA/dupes.current"; NAG="$DATA/dupes-last-nag"
+NAG_EVERY=300   # seconds — re-notify about existing duplicates every 5 minute-ticks
 [ -f "$CONF" ] && . "$CONF"
 : "${EBK_TOKEN:?run expenses set-token first}"
-mkdir -p "$DATA"; touch "$SEEN"; : > "$ATTN.tmp"
+mkdir -p "$DATA"; touch "$SEEN"; : > "$ATTN.tmp"; : > "$DUPNEW"
 ACCT="3846510145777434624"
 declare -A CATS=( ["Food & Drink"]="3846513861192581120" ["Clothing & Apparel"]="3846513219094970382" ["Housing & Houseware"]="3846513219094970386" ["Transportation"]="3846513219094970394" ["Auto/Fuel"]="3846514795347968000" ["Vacation"]="3846528251480506368" ["Coms"]="3846513219094970397" ["Entertainment"]="3846513219094970402" ["Education"]="3846513219094970408" ["Gifts & Donate"]="3846513219094970410" ["Medical"]="3846513219094970412" ["Finance & Insurance"]="3846513219094970417" ["Misc"]="3846514795347968002" )
 TZNAME="America/Anchorage"; TZOFF="-480"
@@ -15,16 +18,42 @@ EBK_URL="${EBK_URL:-http://localhost:9400}"
 log(){ echo "$(date -Is) $*" >> "$LOG"; }
 attn(){ echo "$1" >> "$ATTN.tmp"; log "NEEDS-REVIEW $1"; }
 while IFS= read -r f; do
+  # same receipt name already filed in a month folder -> flag & skip it here
+  b=$(basename "$f")
+  dup=""
+  for d in "$BASE"/*" Receipts"*/; do
+    if [ -e "$d/$b" ]; then dup="${d%/}"; break; fi
+  done
+  if [ -n "$dup" ]; then
+    echo "$b|$(basename "$dup")" >> "$DUPNEW"
+    continue
+  fi
   grep -qxF "$f" "$SEEN" && continue
-  # bake EXIF rotation into pixels so tesseract sees upright text
-  command -v mogrify >/dev/null 2>&1 && mogrify -auto-orient "$f" 2>/dev/null || true
-  txt=$(tesseract "$f" stdout 2>/dev/null || true)
+  # PDFs: render first page to JPG for OCR + upload (ez only takes images)
+  src="$f"
+  if [[ "$f" =~ \.[Pp][Dd][Ff]$ ]]; then
+    rm -f /tmp/ez-pdf.jpg
+    if pdftoppm -jpeg -r 200 -f 1 -l 1 "$f" /tmp/ez-pdf 2>/dev/null && [ -f /tmp/ez-pdf-1.jpg ]; then
+      mv /tmp/ez-pdf-1.jpg /tmp/ez-pdf.jpg; src="/tmp/ez-pdf.jpg"
+      log "PDF-RENDER $f -> $src"
+    else
+      attn "$(basename "$f") PDF could not be rendered — left top-level"
+      log "FAILED $f pdftoppm render failed"
+      echo "$f" >> "$SEEN"; continue
+    fi
+  else
+    # bake EXIF rotation into pixels so tesseract sees upright text
+    command -v mogrify >/dev/null 2>&1 && mogrify -auto-orient "$f" 2>/dev/null || true
+  fi
+  txt=$(tesseract "$src" stdout 2>/dev/null || true)
   # date: first MM/DD/YY(YY) match
   dt=$(echo "$txt" | grep -oE '[0-9]{1,2}/[0-9]{1,2}/[0-9]{2,4}' | head -1)
   datestr=""
   if [ -n "$dt" ]; then
     m=${dt%%/*}; rest=${dt#*/}; d=${rest%%/*}; y=${rest#*/}
     [ ${#y} -eq 2 ] && y="20$y"
+    # force base-10: leading-zero 08/09 are invalid octal to printf
+    m=$((10#$m)); d=$((10#$d)); y=$((10#$y))
     if [ "$m" -ge 1 ] 2>/dev/null && [ "$m" -le 12 ] 2>/dev/null && [ "$d" -ge 1 ] 2>/dev/null && [ "$d" -le 31 ] 2>/dev/null; then
       datestr=$(printf "%s-%02d-%02d" "$y" "$m" "$d")
     fi
@@ -48,7 +77,7 @@ while IFS= read -r f; do
   cents=$(python3 -c "print(int(round(float('$amt')*100)))")
   ts=$(date -d "$datestr 12:00" +%s)
   # upload photo first (API needs lowercase extension)
-  cp "$f" /tmp/ez-up.jpg
+  cp "$src" /tmp/ez-up.jpg
   up=$(curl -s -H "Authorization: Bearer $EBK_TOKEN" -X POST "$EBK_URL/api/v1/transaction/pictures/upload.json" -F "picture=@/tmp/ez-up.jpg")
   pid=$(echo "$up" | python3 -c "import json,sys; print(json.load(sys.stdin).get('result',{}).get('pictureId',''))" 2>/dev/null)
   if [ -n "$pid" ]; then picjson=",\"pictureIds\":[\"$pid\"]"; else picjson=""; fi
@@ -63,7 +92,7 @@ while IFS= read -r f; do
     log "FAILED $f $resp"
   fi
   echo "$f" >> "$SEEN"
-done < <(find "$BASE" -maxdepth 1 -iname "*.jpg" | sort)
+done < <(find "$BASE" -maxdepth 1 \( -iname "*.jpg" -o -iname "*.pdf" \) | sort)
 # notify if anything needs attention
 if [ -s "$ATTN.tmp" ]; then
   mv "$ATTN.tmp" "$ATTN"
@@ -73,5 +102,33 @@ if [ -s "$ATTN.tmp" ]; then
 else
   rm -f "$ATTN.tmp"
   : > "$ATTN"
+fi
+# duplicate-name report: re-notify every NAG_EVERY seconds while a dup sits in the queue
+if [ -s "$DUPNEW" ]; then
+  mv "$DUPNEW" "$DUPES"
+  sort -u -o "$DUPES" "$DUPES"
+else
+  rm -f "$DUPNEW"
+  : > "$DUPES"
+fi
+if [ -s "$DUPES" ]; then
+  line=$(head -1 "$DUPES")
+  msg="${line%%|*} is already filed in ${line#*|}"
+  extra=$(( $(wc -l < "$DUPES") - 1 ))
+  [ "$extra" -gt 0 ] && msg="$msg (+$extra more)"
+  now=$(date +%s); last=$(cat "$NAG" 2>/dev/null || echo 0)
+  if [ $(( now - last )) -ge "$NAG_EVERY" ]; then
+    log "DUPLICATE-NAME nag: $msg"
+    # Persistent toast: left-click opens the 2026 Receipts folder in Omafile,
+    # right-click dismisses. Critical urgency = the shell never auto-expires it.
+    omarchy-notification-send -u critical --app-name "Expenses" \
+      "Expenses: duplicate receipt name(s)" \
+      "$msg — left-click: open folder · right-click: dismiss" \
+      --exec "$HOME/.config/omarchy/plugins/xyzlab.omafile/bin/omafile-open" "$BASE" >/dev/null 2>&1 ||
+      notify-send -u normal "Expenses: duplicate receipt name(s)" "$msg" 2>/dev/null || true
+    echo "$now" > "$NAG"
+  fi
+else
+  rm -f "$NAG"
 fi
 echo "done, see $LOG"
